@@ -1,0 +1,86 @@
+name: CI
+on:
+  schedule:
+    - cron: '0 */3 * * *' # 每3小时运行一次
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Make script executable and install dependencies
+      run: |
+        chmod +x CloudflareST
+        chmod +x ip/chromedriver
+        python -m pip install --upgrade pip
+        pip install pandas selenium
+        pip install requests beautifulsoup4 
+
+    - name: Update IP List
+      run: |
+        python ${{ github.workspace }}/ip/collect_ips.py
+
+    - name: Create symbolic link for ip.txt
+      run: |
+        # 简化符号链接创建
+        ls -la ip/ || echo "ip directory not found"
+        ls -la ip/ip.txt || echo "ip.txt not found in ip directory"
+        # 直接创建符号链接
+        ln -svf ip/ip.txt ip.txt
+        ls -la ip.txt
+
+    - name: Run TLS scan
+      run: |
+        ./CloudflareST -httping -allip -sl 4 -dn 13 -tl 300 
+        python convert_csv_to_tls.py
+
+          #-httping -cfcolo HKG,KHH,NRT,LAX,SEA,SJC,FRA,MAD -allip -sl 4 -dn 13 -tl 300 
+
+    - name: Run cf_auto
+      run: python ip/cf_auto.py
+
+    - name: Remove symbolic link
+      run: |
+        # 删除符号链接
+        rm -v ip.txt
+
+    - name: Commit and push changes
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -e
+        git config --local user.name "github-actions[bot]"
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        # 添加所有更改的文件
+        git add -A
+        # 检查是否有更改需要提交
+        if git diff --cached --quiet; then
+          echo "No changes to commit."
+          exit 0
+        fi
+        git commit -m "Update IP list [skip ci]"
+        # 拉取远程更改并重试推送
+        n=0
+        until git push origin HEAD:main; do
+          n=$((n+1))
+          if [ $n -ge 3 ]; then
+            echo "Push failed after $n attempts."
+            exit 1
+          fi
+          echo "Push rejected, fetching and rebasing onto origin/main (attempt $n)..."
+          git fetch origin
+          git rebase origin/main
+        done
